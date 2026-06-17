@@ -1,4 +1,5 @@
 using Duckov.Buildings;
+using Duckov.PerkTrees;
 using Duckov.Quests;
 using Duckov.Quests.Tasks;
 using Duckov.Utilities;
@@ -113,15 +114,9 @@ namespace QuestItemRequirementsDisplay
         /// <returns></returns>
         static public List<Quest> GetRequiredQuests(Item item)
         {
-            var finishedQuestsId = QuestManager.Instance.HistoryQuests.Select(q => q.ID);
-
-            // Quests that require this item to be prepared
-            var requiredQuests = TotalQuests
-                // Get only unfinished quests that require this item
-                .Where(q => !finishedQuestsId.Contains(q.ID) && q.RequiredItemID == item.TypeID)
-                .ToList();
-
-            return requiredQuests;
+            if (item == null) return new List<Quest>();
+            RequirementCache.Ensure(item.TypeID);
+            return RequirementCache.GetPreparedQuests(item.TypeID);
         }
 
         public struct RequiredPerk
@@ -130,6 +125,38 @@ namespace QuestItemRequirementsDisplay
             public string PerkTreeName;
             public string PerkName;
         }
+
+        public readonly struct SubmitItemRequirement
+        {
+            public SubmitItemRequirement(SubmitItems? task, int questId, string questName, int remaining)
+            {
+                Task = task;
+                QuestId = questId;
+                QuestName = questName;
+                Remaining = remaining;
+            }
+
+            public SubmitItems? Task { get; }
+            public int QuestId { get; }
+            public string QuestName { get; }
+            public int Remaining { get; }
+        }
+
+        public readonly struct UseItemRequirement
+        {
+            public UseItemRequirement(QuestTask_UseItem? task, int questId, string questName, int remaining)
+            {
+                Task = task;
+                QuestId = questId;
+                QuestName = questName;
+                Remaining = remaining;
+            }
+
+            public QuestTask_UseItem? Task { get; }
+            public int QuestId { get; }
+            public string QuestName { get; }
+            public int Remaining { get; }
+        }
         /// <summary>
         /// Get a list of perks that require the specified item to unlock.
         /// </summary>
@@ -137,23 +164,9 @@ namespace QuestItemRequirementsDisplay
         /// <returns></returns>
         static public List<RequiredPerk> GetRequiredPerkEntries(Item item)
         {
-            var requiredPerkEntries = PerkTreeManager.Instance.perkTrees
-                // Exclude specified perk trees
-                .Where(perkTree => !ExcludedPerkTreeIds.Contains(perkTree.ID))
-                .SelectMany(perkTree => perkTree.Perks
-                    // Select only locked perks with requirements
-                    .Where(perk => perk != null && !perk.Unlocked && perk.Requirement != null && perk.Requirement.cost.items != null)
-                    .SelectMany(perk => perk.Requirement.cost.items
-                        .Where(itemEntry => itemEntry.id == item.TypeID)
-                        .Select(itemEntry => new RequiredPerk
-                        {
-                            Amount = itemEntry.amount,
-                            PerkTreeName = perkTree.DisplayName,
-                            PerkName = perk.DisplayName,
-                        })
-                    )
-                ).ToList();
-            return requiredPerkEntries;
+            if (item == null) return new List<RequiredPerk>();
+            RequirementCache.Ensure(item.TypeID);
+            return RequirementCache.GetPerkRequirements(item.TypeID);
         }
 
         /// <summary>
@@ -161,22 +174,11 @@ namespace QuestItemRequirementsDisplay
         /// </summary>
         /// <param name="item"></param>
         /// <returns></returns>
-        static public List<SubmitItems> GetRequiredSubmitItems(Item item)
+        static public List<SubmitItemRequirement> GetRequiredSubmitItems(Item item)
         {
-            var finishedQuestsId = new HashSet<int>(QuestManager.Instance.HistoryQuests.Select(q => q.ID));
-
-            var requiredSubmitItems = TotalQuests
-                // Skip if the quest is already completed
-                .Where(quest => !finishedQuestsId.Contains(quest.ID) && quest.Tasks != null)
-                .SelectMany(quest => quest.Tasks
-                    // Select only SubmitItems tasks
-                    .OfType<SubmitItems>()
-                    // Filter unfinished tasks that match the item type ID
-                    .Where(submitItem => !submitItem.IsFinished() && submitItem.ItemTypeID == item.TypeID)
-                    .Select(submitItem => submitItem)
-                ).ToList();
-
-            return requiredSubmitItems;
+            if (item == null) return new List<SubmitItemRequirement>();
+            RequirementCache.Ensure(item.TypeID);
+            return RequirementCache.GetSubmitRequirements(item.TypeID);
         }
 
         public struct RequiredBuilding
@@ -192,34 +194,9 @@ namespace QuestItemRequirementsDisplay
         /// <returns></returns>
         public static List<RequiredBuilding> GetRequiredBuildings(Item item)
         {
-            // PetHouse is excluded because it has not been implemented yet
-            var excludedBuildingId = "PetHouse";
-            var collection = BuildingDataCollection.Instance;
-            if (collection == null)
-            {
-                return new List<RequiredBuilding>();
-            }
-
-            var result = collection.Infos
-                // Check building's id is not null or empty
-                .Where(info => info.Valid)
-                // Check if the building is not yet placed
-                .Where(info => info.CurrentAmount == 0)
-                // Exclude testing buildings
-                .Where(info => !IsTestingObjectDisplayName(info.DisplayName))
-                // Exclude the buildings which requireBuildings is set and contains the excludedBuildingId
-                // Pass the buildings that do not have requireBuildings set
-                .Where(info => info.requireBuildings == null || info.requireBuildings.Length == 0 || !info.requireBuildings.Contains(excludedBuildingId))
-                .SelectMany(info => info.cost.items
-                    .Where(itemEntry => itemEntry.id == item.TypeID)
-                    .Select(itemEntry => new RequiredBuilding
-                    {
-                        Amount = itemEntry.amount,
-                        BuildingName = info.DisplayName
-                    }))
-                .ToList();
-
-            return result;
+            if (item == null) return new List<RequiredBuilding>();
+            RequirementCache.Ensure(item.TypeID);
+            return RequirementCache.GetBuildingRequirements(item.TypeID);
         }
 
         /// <summary>
@@ -227,29 +204,462 @@ namespace QuestItemRequirementsDisplay
         /// </summary>
         /// <param name="item"></param>
         /// <returns></returns>
-        public static Dictionary<QuestTask_UseItem, int> GetRequiredUseItems(Item item)
+        public static List<UseItemRequirement> GetRequiredUseItems(Item item)
         {
-            var itemTypeIDRef = AccessTools.FieldRefAccess<int>(typeof(QuestTask_UseItem), "itemTypeID");
-            var requireAmountRef = AccessTools.FieldRefAccess<int>(typeof(QuestTask_UseItem), "requireAmount");
+            if (item == null) return new List<UseItemRequirement>();
+            RequirementCache.Ensure(item.TypeID);
+            return RequirementCache.GetUseRequirements(item.TypeID);
+        }
 
-            var finishedQuestsId = new HashSet<int>(QuestManager.Instance.HistoryQuests.Select(q => q.ID));
+        public static void EnsureItemRequirements(int itemTypeId)
+        {
+            if (itemTypeId <= 0) return;
+            RequirementCache.Ensure(itemTypeId);
+        }
 
-            var requiredUseItems = TotalQuests
-                .Where(quest => !finishedQuestsId.Contains(quest.ID) && quest.Tasks != null)
-                .SelectMany(quest => quest.Tasks
-                    .Where(task => task != null)
-                    .OfType<QuestTask_UseItem>()
-                    .Where(useItem => {
-                        var itemTypeID = itemTypeIDRef(useItem);
-                        return !useItem.IsFinished() && itemTypeID == item.TypeID;
-                    })
-                    .Select(useItem => {
-                        var requireAmount = requireAmountRef(useItem);
-                        return new { useItem, requireAmount };
-                    })
-                )
-                .ToDictionary(x => x.useItem, x => x.requireAmount);
-            return requiredUseItems;
+        public static void SubscribeRequirementEvents()
+        {
+            RequirementCache.SubscribeEvents();
+        }
+
+        public static void UnsubscribeRequirementEvents()
+        {
+            RequirementCache.UnsubscribeEvents();
+        }
+
+        private sealed class ItemRequirementSnapshot
+        {
+            public List<Quest> PreparedQuests { get; set; } = new List<Quest>();
+            public List<SubmitItemRequirement> SubmitRequirements { get; set; } = new List<SubmitItemRequirement>();
+            public List<UseItemRequirement> UseRequirements { get; set; } = new List<UseItemRequirement>();
+            public List<RequiredPerk> PerkRequirements { get; set; } = new List<RequiredPerk>();
+            public List<RequiredBuilding> BuildingRequirements { get; set; } = new List<RequiredBuilding>();
+        }
+
+        private static class RequirementCache
+        {
+            private static readonly Dictionary<int, ItemRequirementSnapshot> Cache = new Dictionary<int, ItemRequirementSnapshot>();
+            private static bool _isDirty = true;
+            private static bool _eventsSubscribed;
+            private static readonly List<PerkTree> SubscribedPerkTrees = new List<PerkTree>();
+            private static readonly List<Perk> SubscribedPerks = new List<Perk>();
+
+            public static void Ensure(int itemTypeId)
+            {
+                if (itemTypeId <= 0)
+                {
+                    return;
+                }
+
+                if (_isDirty)
+                {
+                    Cache.Clear();
+                    _isDirty = false;
+                }
+
+                if (!Cache.TryGetValue(itemTypeId, out var snapshot))
+                {
+                    snapshot = BuildSnapshot(itemTypeId);
+                    Cache[itemTypeId] = snapshot;
+                }
+            }
+
+            public static List<Quest> GetPreparedQuests(int itemTypeId)
+            {
+                return Cache.TryGetValue(itemTypeId, out var snapshot)
+                    ? new List<Quest>(snapshot.PreparedQuests)
+                    : new List<Quest>();
+            }
+
+            public static List<SubmitItemRequirement> GetSubmitRequirements(int itemTypeId)
+            {
+                return Cache.TryGetValue(itemTypeId, out var snapshot)
+                    ? new List<SubmitItemRequirement>(snapshot.SubmitRequirements)
+                    : new List<SubmitItemRequirement>();
+            }
+
+            public static List<UseItemRequirement> GetUseRequirements(int itemTypeId)
+            {
+                return Cache.TryGetValue(itemTypeId, out var snapshot)
+                    ? new List<UseItemRequirement>(snapshot.UseRequirements)
+                    : new List<UseItemRequirement>();
+            }
+
+            public static List<RequiredPerk> GetPerkRequirements(int itemTypeId)
+            {
+                return Cache.TryGetValue(itemTypeId, out var snapshot)
+                    ? new List<RequiredPerk>(snapshot.PerkRequirements)
+                    : new List<RequiredPerk>();
+            }
+
+            public static List<RequiredBuilding> GetBuildingRequirements(int itemTypeId)
+            {
+                return Cache.TryGetValue(itemTypeId, out var snapshot)
+                    ? new List<RequiredBuilding>(snapshot.BuildingRequirements)
+                    : new List<RequiredBuilding>();
+            }
+
+            public static void SubscribeEvents()
+            {
+                if (_eventsSubscribed)
+                {
+                    return;
+                }
+
+                QuestManager.onQuestListsChanged += OnQuestListsChanged;
+                QuestManager.OnTaskFinishedEvent += OnQuestTaskFinished;
+                Quest.onQuestStatusChanged += OnQuestChanged;
+                Quest.onQuestCompleted += OnQuestChanged;
+                Quest.onQuestActivated += OnQuestChanged;
+
+                BuildingManager.OnBuildingListChanged += OnBuildingListChanged;
+
+                LevelManager.OnAfterLevelInitialized += OnLevelReady;
+                if (LevelManager.LevelInited)
+                {
+                    RegisterPerkEvents();
+                }
+
+                _eventsSubscribed = true;
+            }
+
+            public static void UnsubscribeEvents()
+            {
+                if (!_eventsSubscribed)
+                {
+                    return;
+                }
+
+                QuestManager.onQuestListsChanged -= OnQuestListsChanged;
+                QuestManager.OnTaskFinishedEvent -= OnQuestTaskFinished;
+                Quest.onQuestStatusChanged -= OnQuestChanged;
+                Quest.onQuestCompleted -= OnQuestChanged;
+                Quest.onQuestActivated -= OnQuestChanged;
+
+                BuildingManager.OnBuildingListChanged -= OnBuildingListChanged;
+
+                LevelManager.OnAfterLevelInitialized -= OnLevelReady;
+
+                UnregisterPerkEvents();
+
+                _eventsSubscribed = false;
+            }
+
+            private static ItemRequirementSnapshot BuildSnapshot(int itemTypeId)
+            {
+                return new ItemRequirementSnapshot
+                {
+                    PreparedQuests = ComputePreparedQuests(itemTypeId),
+                    SubmitRequirements = ComputeSubmitRequirements(itemTypeId),
+                    UseRequirements = ComputeUseRequirements(itemTypeId),
+                    PerkRequirements = ComputePerkRequirements(itemTypeId),
+                    BuildingRequirements = ComputeBuildingRequirements(itemTypeId)
+                };
+            }
+
+            private static List<Quest> ComputePreparedQuests(int itemTypeId)
+            {
+                var finishedIds = QuestManager.Instance != null
+                    ? new HashSet<int>(QuestManager.Instance.HistoryQuests.Select(q => q.ID))
+                    : new HashSet<int>();
+
+                return TotalQuests
+                    .Where(q => q != null && q.RequiredItemID == itemTypeId && !finishedIds.Contains(q.ID))
+                    .ToList();
+            }
+
+            private static List<SubmitItemRequirement> ComputeSubmitRequirements(int itemTypeId)
+            {
+                var results = new List<SubmitItemRequirement>();
+                var questManager = QuestManager.Instance;
+                var requiredAmountRef = AccessTools.FieldRefAccess<int>(typeof(SubmitItems), "requiredAmount");
+                var submittedAmountRef = AccessTools.FieldRefAccess<int>(typeof(SubmitItems), "submittedAmount");
+
+                var activeQuests = questManager?.ActiveQuests ?? new List<Quest>();
+                var activeQuestIds = new HashSet<int>(activeQuests.Where(q => q != null).Select(q => q.ID));
+
+                foreach (var quest in activeQuests)
+                {
+                    if (quest?.Tasks == null) continue;
+
+                    foreach (var submitItem in quest.Tasks.OfType<SubmitItems>())
+                    {
+                        if (submitItem.ItemTypeID != itemTypeId) continue;
+                        if (submitItem.IsFinished()) continue;
+
+                        var remaining = Math.Max(0, requiredAmountRef(submitItem) - submittedAmountRef(submitItem));
+                        if (remaining <= 0) continue;
+
+                        results.Add(new SubmitItemRequirement(
+                            submitItem,
+                            quest.ID,
+                            quest.DisplayName,
+                            remaining));
+                    }
+                }
+
+                var finishedIds = questManager != null
+                    ? new HashSet<int>(questManager.HistoryQuests.Select(q => q.ID))
+                    : new HashSet<int>();
+
+                foreach (var quest in TotalQuests)
+                {
+                    if (quest == null) continue;
+                    if (finishedIds.Contains(quest.ID)) continue;
+                    if (activeQuestIds.Contains(quest.ID)) continue;
+                    if (quest.Tasks == null) continue;
+
+                    foreach (var submitItem in quest.Tasks.OfType<SubmitItems>())
+                    {
+                        if (submitItem.ItemTypeID != itemTypeId) continue;
+                        var required = requiredAmountRef(submitItem);
+                        if (required <= 0) continue;
+
+                        results.Add(new SubmitItemRequirement(
+                            null,
+                            quest.ID,
+                            quest.DisplayName,
+                            required));
+                    }
+                }
+
+                return results;
+            }
+
+            private static List<UseItemRequirement> ComputeUseRequirements(int itemTypeId)
+            {
+                var results = new List<UseItemRequirement>();
+                var questManager = QuestManager.Instance;
+                var itemTypeRef = AccessTools.FieldRefAccess<int>(typeof(QuestTask_UseItem), "itemTypeID");
+                var requireAmountRef = AccessTools.FieldRefAccess<int>(typeof(QuestTask_UseItem), "requireAmount");
+                var usedAmountRef = AccessTools.FieldRefAccess<int>(typeof(QuestTask_UseItem), "amount");
+
+                var activeQuests = questManager?.ActiveQuests ?? new List<Quest>();
+                var activeQuestIds = new HashSet<int>(activeQuests.Where(q => q != null).Select(q => q.ID));
+
+                foreach (var quest in activeQuests)
+                {
+                    if (quest?.Tasks == null) continue;
+
+                    foreach (var useItem in quest.Tasks.OfType<QuestTask_UseItem>())
+                    {
+                        if (itemTypeRef(useItem) != itemTypeId) continue;
+                        if (useItem.IsFinished()) continue;
+
+                        var remaining = Math.Max(0, requireAmountRef(useItem) - usedAmountRef(useItem));
+                        if (remaining <= 0) continue;
+
+                        results.Add(new UseItemRequirement(
+                            useItem,
+                            quest.ID,
+                            quest.DisplayName,
+                            remaining));
+                    }
+                }
+
+                var finishedIds = questManager != null
+                    ? new HashSet<int>(questManager.HistoryQuests.Select(q => q.ID))
+                    : new HashSet<int>();
+
+                foreach (var quest in TotalQuests)
+                {
+                    if (quest == null) continue;
+                    if (finishedIds.Contains(quest.ID)) continue;
+                    if (activeQuestIds.Contains(quest.ID)) continue;
+                    if (quest.Tasks == null) continue;
+
+                    foreach (var useItem in quest.Tasks.OfType<QuestTask_UseItem>())
+                    {
+                        if (itemTypeRef(useItem) != itemTypeId) continue;
+                        var required = requireAmountRef(useItem);
+                        if (required <= 0) continue;
+
+                        results.Add(new UseItemRequirement(
+                            null,
+                            quest.ID,
+                            quest.DisplayName,
+                            required));
+                    }
+                }
+
+                return results;
+            }
+
+            private static List<RequiredPerk> ComputePerkRequirements(int itemTypeId)
+            {
+                var results = new List<RequiredPerk>();
+                var manager = PerkTreeManager.Instance;
+                if (manager == null) return results;
+
+                foreach (var perkTree in manager.perkTrees)
+                {
+                    if (perkTree == null) continue;
+                    if (ExcludedPerkTreeIds.Contains(perkTree.ID)) continue;
+
+                    foreach (var perk in perkTree.Perks)
+                    {
+                        if (perk == null) continue;
+                        if (perk.Unlocked) continue;
+                        if (perk.Unlocking) continue;
+                        var requirement = perk.Requirement;
+                        if (requirement == null) continue;
+                        var costItems = requirement.cost.items;
+                        if (costItems == null) continue;
+
+                        foreach (var entry in costItems)
+                        {
+                            if (entry.id != itemTypeId) continue;
+                            results.Add(new RequiredPerk
+                            {
+                                Amount = entry.amount,
+                                PerkTreeName = perkTree.DisplayName,
+                                PerkName = perk.DisplayName
+                            });
+                        }
+                    }
+                }
+
+                return results;
+            }
+
+            private static List<RequiredBuilding> ComputeBuildingRequirements(int itemTypeId)
+            {
+                var result = new List<RequiredBuilding>();
+                var collection = BuildingDataCollection.Instance;
+                if (collection == null)
+                {
+                    return result;
+                }
+
+                const string excludedBuildingId = "PetHouse";
+
+                foreach (var info in collection.Infos)
+                {
+                    if (!info.Valid) continue;
+                    if (info.CurrentAmount != 0) continue;
+                    if (IsTestingObjectDisplayName(info.DisplayName)) continue;
+
+                    if (info.requireBuildings != null && info.requireBuildings.Length > 0)
+                    {
+                        if (info.requireBuildings.Contains(info.id))
+                        {
+                            continue;
+                        }
+
+                        if (info.requireBuildings.Contains(excludedBuildingId))
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (info.cost.items == null) continue;
+
+                    foreach (var itemEntry in info.cost.items)
+                    {
+                        if (itemEntry.id != itemTypeId) continue;
+                        result.Add(new RequiredBuilding
+                        {
+                            Amount = itemEntry.amount,
+                            BuildingName = info.DisplayName
+                        });
+                    }
+                }
+
+                return result;
+            }
+
+            private static void RegisterPerkEvents()
+            {
+                UnregisterPerkEvents();
+
+                var manager = PerkTreeManager.Instance;
+                if (manager == null) return;
+
+                foreach (var perkTree in manager.perkTrees)
+                {
+                    if (perkTree == null) continue;
+                    perkTree.onPerkTreeStatusChanged += OnPerkTreeStatusChanged;
+                    SubscribedPerkTrees.Add(perkTree);
+
+                    foreach (var perk in perkTree.Perks)
+                    {
+                        if (perk == null) continue;
+                        perk.onUnlockStateChanged += OnPerkUnlockStateChanged;
+                        SubscribedPerks.Add(perk);
+                    }
+                }
+
+                Perk.OnPerkUnlockConfirmed += OnPerkUnlockConfirmed;
+            }
+
+            private static void UnregisterPerkEvents()
+            {
+                foreach (var perk in SubscribedPerks)
+                {
+                    if (perk != null)
+                    {
+                        perk.onUnlockStateChanged -= OnPerkUnlockStateChanged;
+                    }
+                }
+                SubscribedPerks.Clear();
+
+                foreach (var tree in SubscribedPerkTrees)
+                {
+                    if (tree != null)
+                    {
+                        tree.onPerkTreeStatusChanged -= OnPerkTreeStatusChanged;
+                    }
+                }
+                SubscribedPerkTrees.Clear();
+
+                Perk.OnPerkUnlockConfirmed -= OnPerkUnlockConfirmed;
+            }
+
+            private static void Invalidate()
+            {
+                _isDirty = true;
+            }
+
+            private static void OnQuestListsChanged(QuestManager manager)
+            {
+                Invalidate();
+            }
+
+            private static void OnQuestTaskFinished(Quest quest, Duckov.Quests.Task task)
+            {
+                Invalidate();
+            }
+
+            private static void OnQuestChanged(Quest quest)
+            {
+                Invalidate();
+            }
+
+            private static void OnBuildingListChanged()
+            {
+                Invalidate();
+            }
+
+            private static void OnPerkUnlockStateChanged(Perk perk, bool _)
+            {
+                Invalidate();
+            }
+
+            private static void OnPerkUnlockConfirmed(Perk perk)
+            {
+                Invalidate();
+            }
+
+            private static void OnPerkTreeStatusChanged(PerkTree tree)
+            {
+                Invalidate();
+            }
+
+            private static void OnLevelReady()
+            {
+                RegisterPerkEvents();
+                Invalidate();
+            }
         }
     }
 }
